@@ -200,12 +200,12 @@ app.post("/webhooks/github", async (request: Request, response: Response) => {
   const command = extractCommand(commentBody);
 
   if (payload.action !== "created" || !payload.issue?.pull_request) {
-    response.status(202).json({ ignored: "Only PR issue_comment created events are handled." });
+    response.status(429).json({ ignored: "Only PR issue_comment created events are handled." });
     return;
   }
 
   if (!command) {
-    response.status(202).json({ ignored: "No supported workflow command detected." });
+    response.status(400).json({ ignored: "No supported workflow command detected." });
     return;
   }
 
