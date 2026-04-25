@@ -38,11 +38,35 @@ export class GitHubModelsWorkflowClient {
   constructor(options: GitHubModelsWorkflowClientOptions = {}) {
     this.token = options.token ?? process.env.GITHUB_TOKEN;
     this.apiBaseUrl = options.apiBaseUrl ?? process.env.GITHUB_MODELS_API_URL ?? "https://models.github.ai/inference";
-    this.model = options.model ?? process.env.GITHUB_MODEL ?? "openai/gpt-4.1-mini";
+    this.model = options.model ?? process.env.GITHUB_MODEL ?? "openai/gpt-4o-mini";
   }
 
   isConfigured(): boolean {
     return Boolean(this.token);
+  }
+
+  async listModels(): Promise<string[]> {
+    if (!this.token) {
+      throw new Error("GITHUB_TOKEN is not configured.");
+    }
+
+    const url = `${this.apiBaseUrl.replace(/\/$/, "")}/v1/models`;
+    const response = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${this.token}`,
+        "User-Agent": "sdlc-ai-scaffold",
+      },
+    });
+
+    const responseText = await response.text();
+    if (!response.ok) {
+      throw new Error(`Failed to list models (${response.status}): ${responseText.slice(0, 300)}`);
+    }
+
+    const payload = JSON.parse(responseText) as { data?: Array<{ id: string }> } | Array<{ id: string }>;
+    const items = Array.isArray(payload) ? payload : (payload.data ?? []);
+    return items.map((m) => m.id).sort();
   }
 
   async renderArtifact(input: RenderArtifactInput): Promise<string> {
@@ -50,20 +74,24 @@ export class GitHubModelsWorkflowClient {
       return this.renderArtifactFallback(input);
     }
 
-    return this.generateText([
-      "You are generating a structured markdown artifact for a spec-driven development pipeline.",
-      "Return markdown only.",
-      "",
-      `Title: ${input.title}`,
-      `Summary: ${input.summary}`,
-      "",
-      ...input.sections.flatMap((section) => [
-        `Section: ${section.heading}`,
-        section.body ? `Body: ${section.body}` : undefined,
-        section.bullets?.length ? `Bullets: ${section.bullets.join(" | ")}` : undefined,
+    try {
+      return await this.generateText([
+        "You are generating a structured markdown artifact for a spec-driven development pipeline.",
+        "Return markdown only.",
         "",
-      ]),
-    ]);
+        `Title: ${input.title}`,
+        `Summary: ${input.summary}`,
+        "",
+        ...input.sections.flatMap((section) => [
+          `Section: ${section.heading}`,
+          section.body ? `Body: ${section.body}` : undefined,
+          section.bullets?.length ? `Bullets: ${section.bullets.join(" | ")}` : undefined,
+          "",
+        ]),
+      ]);
+    } catch (error) {
+      return this.renderArtifactFallback(input, error);
+    }
   }
 
   async renderComment(input: RenderCommentInput): Promise<string> {
@@ -71,15 +99,19 @@ export class GitHubModelsWorkflowClient {
       return this.renderCommentFallback(input);
     }
 
-    return this.generateText([
-      "You are generating a concise markdown comment for a GitHub pull request workflow.",
-      "Return markdown only.",
-      "",
-      `Role: ${input.role}`,
-      `Objective: ${input.objective}`,
-      "Inputs:",
-      ...input.inputs.map((entry) => `- ${entry}`),
-    ]);
+    try {
+      return await this.generateText([
+        "You are generating a concise markdown comment for a GitHub pull request workflow.",
+        "Return markdown only.",
+        "",
+        `Role: ${input.role}`,
+        `Objective: ${input.objective}`,
+        "Inputs:",
+        ...input.inputs.map((entry) => `- ${entry}`),
+      ]);
+    } catch (error) {
+      return this.renderCommentFallback(input, error);
+    }
   }
 
   private async generateText(promptLines: Array<string | undefined>): Promise<string> {
@@ -87,7 +119,7 @@ export class GitHubModelsWorkflowClient {
       throw new Error("GITHUB_TOKEN is not configured.");
     }
 
-    const response = await fetch(new URL("/chat/completions", this.apiBaseUrl), {
+    const response = await fetch(this.buildChatCompletionsUrl(), {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -107,9 +139,20 @@ export class GitHubModelsWorkflowClient {
       }),
     });
 
-    const payload = (await response.json()) as ChatCompletionResponse;
+    const responseText = await response.text();
     if (!response.ok) {
-      throw new Error(`GitHub Models request failed with status ${response.status}.`);
+      throw new Error(
+        `GitHub Models request failed with status ${response.status}: ${responseText.slice(0, 300)}`,
+      );
+    }
+
+    let payload: ChatCompletionResponse;
+    try {
+      payload = JSON.parse(responseText) as ChatCompletionResponse;
+    } catch {
+      throw new Error(
+        `GitHub Models returned a non-JSON response: ${responseText.slice(0, 300)}`,
+      );
     }
 
     const content = payload.choices?.[0]?.message?.content?.trim();
@@ -120,7 +163,11 @@ export class GitHubModelsWorkflowClient {
     return content;
   }
 
-  private renderArtifactFallback(input: RenderArtifactInput): string {
+  private buildChatCompletionsUrl(): string {
+    return `${this.apiBaseUrl.replace(/\/$/, "")}/chat/completions`;
+  }
+
+  private renderArtifactFallback(input: RenderArtifactInput, error?: unknown): string {
     const sections = input.sections
       .map((section) => {
         const header = `## ${section.heading}`;
@@ -138,23 +185,31 @@ export class GitHubModelsWorkflowClient {
       "",
       input.summary,
       "",
-      "GITHUB_TOKEN is not set. The scaffold uses deterministic placeholders until GitHub Models access is configured.",
+      this.buildFallbackNotice(error),
       "",
       sections,
       "",
     ].join("\n");
   }
 
-  private renderCommentFallback(input: RenderCommentInput): string {
+  private renderCommentFallback(input: RenderCommentInput, error?: unknown): string {
     return [
       `### ${input.role}`,
       "",
       input.objective,
       "",
-      "LLM client status: not configured.",
+      this.buildFallbackNotice(error),
       "",
       "Inputs:",
       ...input.inputs.map((entry) => `- ${entry}`),
     ].join("\n");
+  }
+
+  private buildFallbackNotice(error?: unknown): string {
+    if (error instanceof Error) {
+      return `GitHub Models request failed, so the scaffold used a deterministic fallback.\n\nError: ${error.message}`;
+    }
+
+    return "GITHUB_TOKEN is not set. The scaffold uses deterministic placeholders until GitHub Models access is configured.";
   }
 }

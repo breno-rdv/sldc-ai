@@ -22,6 +22,7 @@ export interface RoleContext {
   source: CommandSource;
   taskBody: string;
   artifacts: WorkflowArtifacts;
+  repositoryContext?: string;
 }
 
 export interface RoleResult {

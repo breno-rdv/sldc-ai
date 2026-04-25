@@ -6,7 +6,7 @@ export interface ClickUpGitHubContext {
 }
 
 function parseField(description: string, label: string): string | undefined {
-  const match = description.match(new RegExp(`^${label}:\\s*(.+)$`, "im"));
+  const match = description.match(new RegExp(`(?:^|[\\s.])${label}:\\s*(.+)$`, "im"));
   return match?.[1]?.trim();
 }
 

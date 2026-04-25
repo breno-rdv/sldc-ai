@@ -8,7 +8,11 @@ import {
   type CommandSource,
   type WorkflowArtifacts,
 } from "./commands/router";
-import { GitHubPullRequestClient, type PullRequestContext } from "./github/pr";
+import {
+  GitHubPullRequestClient,
+  type PullRequestContext,
+  type RepositoryContext,
+} from "./github/pr";
 import { GitHubModelsWorkflowClient } from "./llm/github-models";
 
 interface ClickUpWebhookPayload {
@@ -36,6 +40,36 @@ interface GitHubIssueCommentWebhookPayload {
       login?: string;
     };
   };
+}
+
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+}
+
+function buildResearchBranchName(taskName: string, taskId?: string): string {
+  const taskSegment = slugify(taskName) || "task";
+  const idSegment = taskId ? slugify(taskId) : `${Date.now()}`;
+  return `ai/research/${taskSegment}-${idSegment}`;
+}
+
+function buildPullRequestBody(taskName: string, taskDescription: string): string {
+  return [
+    "## AI workflow bootstrap",
+    "",
+    `This pull request was created from a ClickUp webhook for **${taskName}**.`,
+    "",
+    "### Task description",
+    taskDescription,
+    "",
+    "### Workflow",
+    "- Review `research.md`.",
+    "- When approved, comment `/plan` on this PR.",
+    "- After the plan is approved, proceed with `/code`.",
+  ].join("\n");
 }
 
 const app = express();
@@ -84,6 +118,20 @@ app.post("/webhooks/clickup", async (request: Request, response: Response) => {
     return;
   }
 
+  if (!githubClient.isConfigured()) {
+    response.status(500).json({
+      error: "GITHUB_TOKEN is required for ClickUp-to-GitHub workflow creation.",
+    });
+    return;
+  }
+
+  const repository: RepositoryContext = {
+    owner: githubContext.owner,
+    repo: githubContext.repo,
+  };
+  const branchName = githubContext.branch ?? buildResearchBranchName(taskName, payload.task?.id);
+  const branchDetails = await githubClient.ensureBranch(repository, branchName);
+  const repositoryContext = await githubClient.getRepositoryResearchContext(repository);
   const result = await routeCommand(
     "/research",
     {
@@ -93,38 +141,54 @@ app.post("/webhooks/clickup", async (request: Request, response: Response) => {
         "",
         `GitHub Owner: ${githubContext.owner}`,
         `GitHub Repo: ${githubContext.repo}`,
-        githubContext.branch ? `GitHub Branch: ${githubContext.branch}` : undefined,
-        githubContext.pullNumber ? `GitHub PR: #${githubContext.pullNumber}` : undefined,
+        `GitHub Branch: ${branchDetails.branch}`,
+        `GitHub Base Branch: ${branchDetails.baseBranch}`,
         "",
         taskDescription,
       ]
         .filter((value): value is string => Boolean(value))
         .join("\n"),
       artifacts: {},
+      repositoryContext,
     },
     llmClient,
   );
 
-  let syncedToPullRequest = false;
-  if (result.kind === "artifact" && githubContext.pullNumber && githubClient.isConfigured()) {
-    const prContext: PullRequestContext = {
-      owner: githubContext.owner,
-      repo: githubContext.repo,
-      pullNumber: githubContext.pullNumber,
+  let pullRequest: PullRequestContext & { htmlUrl: string; branch: string; baseBranch: string } | undefined;
+  if (result.kind === "artifact") {
+    await githubClient.upsertArtifactFileOnBranch(
+      repository,
+      branchDetails.branch,
+      result.fileName,
+      result.content,
+    );
+    const createdPullRequest = await githubClient.createPullRequestForBranch(
+      repository,
+      branchDetails.branch,
+      `research: ${taskName}`,
+      buildPullRequestBody(taskName, taskDescription),
+      branchDetails.baseBranch,
+    );
+
+    pullRequest = {
+      owner: repository.owner,
+      repo: repository.repo,
+      pullNumber: createdPullRequest.number,
+      htmlUrl: createdPullRequest.html_url,
+      branch: createdPullRequest.head.ref,
+      baseBranch: createdPullRequest.base.ref,
     };
 
-    await githubClient.upsertArtifactFile(prContext, result.fileName, result.content);
     await githubClient.postComment(
-      prContext,
-      `Generated \`${result.fileName}\` from the ClickUp webhook.\n\n${result.summary}`,
+      pullRequest,
+      `Generated \`${result.fileName}\` from the ClickUp webhook.\n\n${result.summary}\n\nWhen the research looks good, comment \`/plan\` on this PR.`,
     );
-    syncedToPullRequest = true;
   }
 
   response.status(202).json({
-    message: "Research scaffold generated from ClickUp webhook.",
+    message: "Research scaffold generated from ClickUp webhook and synced to a pull request.",
     githubTarget: githubContext,
-    syncedToPullRequest,
+    pullRequest,
     result,
   });
 });

@@ -1,5 +1,10 @@
 import type { ArtifactFileName, WorkflowArtifacts } from "../commands/router";
 
+export interface RepositoryContext {
+  owner: string;
+  repo: string;
+}
+
 export interface PullRequestContext {
   owner: string;
   repo: string;
@@ -16,17 +21,53 @@ interface GitHubRepositoryRef {
 }
 
 interface PullRequestDetails {
+  number: number;
+  html_url: string;
   head: {
     ref: string;
     sha: string;
     repo: GitHubRepositoryRef;
   };
+  base: {
+    ref: string;
+    repo: GitHubRepositoryRef;
+  };
+}
+
+interface RepositoryDetails {
+  default_branch: string;
+  description: string | null;
+  name: string;
+  owner: GitHubUser;
 }
 
 interface ContentFileResponse {
   sha: string;
   content: string;
   encoding: string;
+}
+
+interface DirectoryEntryResponse {
+  name: string;
+  path: string;
+  type: "file" | "dir";
+}
+
+interface GitReferenceResponse {
+  object: {
+    sha: string;
+  };
+}
+
+interface PullRequestSummary {
+  number: number;
+  html_url: string;
+  head: {
+    ref: string;
+  };
+  base: {
+    ref: string;
+  };
 }
 
 interface GitHubClientOptions {
@@ -43,10 +84,6 @@ export class GitHubApiError extends Error {
     super(message);
     this.name = "GitHubApiError";
   }
-}
-
-function formatPullRequestRef(context: PullRequestContext): string {
-  return `${context.owner}/${context.repo}#${context.pullNumber}`;
 }
 
 function encodeBase64(value: string): string {
@@ -97,35 +134,149 @@ export class GitHubPullRequestClient {
     );
   }
 
+  async ensureBranch(
+    repository: RepositoryContext,
+    branchName: string,
+  ): Promise<{ branch: string; baseBranch: string }> {
+    const repoDetails = await this.getRepository(repository);
+
+    try {
+      await this.getReference(repository, branchName);
+      return {
+        branch: branchName,
+        baseBranch: repoDetails.default_branch,
+      };
+    } catch (error) {
+      if (!(error instanceof GitHubApiError) || error.status !== 404) {
+        throw error;
+      }
+    }
+
+    const defaultBranchReference = await this.getReference(repository, repoDetails.default_branch);
+    await this.request(`/repos/${repository.owner}/${repository.repo}/git/refs`, {
+      method: "POST",
+      body: JSON.stringify({
+        ref: `refs/heads/${branchName}`,
+        sha: defaultBranchReference.object.sha,
+      }),
+    });
+
+    return {
+      branch: branchName,
+      baseBranch: repoDetails.default_branch,
+    };
+  }
+
   async upsertArtifactFile(
     context: PullRequestContext,
     fileName: string,
     content: string,
   ): Promise<void> {
     const pullRequest = await this.getPullRequest(context);
-    const headRepository = pullRequest.head.repo;
-    const ref = pullRequest.head.ref;
-    const existingFile = await this.getContentMetadata(
+    await this.upsertArtifactFileOnBranch(
       {
-        owner: headRepository.owner.login,
-        repo: headRepository.name,
+        owner: pullRequest.head.repo.owner.login,
+        repo: pullRequest.head.repo.name,
       },
+      pullRequest.head.ref,
       fileName,
-      ref,
+      content,
+    );
+  }
+
+  async upsertArtifactFileOnBranch(
+    repository: RepositoryContext,
+    branch: string,
+    fileName: string,
+    content: string,
+  ): Promise<void> {
+    const existingFile = await this.getContentMetadata(
+      repository,
+      fileName,
+      branch,
     );
 
     await this.request(
-      `/repos/${headRepository.owner.login}/${headRepository.name}/contents/${encodeURIComponent(fileName)}`,
+      `/repos/${repository.owner}/${repository.repo}/contents/${encodeURIComponent(fileName)}`,
       {
         method: "PUT",
         body: JSON.stringify({
           message: `chore(ai): update ${fileName}`,
           content: encodeBase64(content),
-          branch: ref,
+          branch,
           sha: existingFile?.sha,
         }),
       },
     );
+  }
+
+  async createPullRequestForBranch(
+    repository: RepositoryContext,
+    branch: string,
+    title: string,
+    body: string,
+    baseBranch: string,
+  ): Promise<PullRequestSummary> {
+    const existingPullRequest = await this.findOpenPullRequestForBranch(repository, branch);
+    if (existingPullRequest) {
+      return existingPullRequest;
+    }
+
+    return this.request<PullRequestSummary>(`/repos/${repository.owner}/${repository.repo}/pulls`, {
+      method: "POST",
+      body: JSON.stringify({
+        title,
+        head: branch,
+        base: baseBranch,
+        body,
+      }),
+    });
+  }
+
+  async getRepositoryResearchContext(repository: RepositoryContext): Promise<string> {
+    const repoDetails = await this.getRepository(repository);
+    const rootEntries = await this.listDirectory(repository, "", repoDetails.default_branch);
+    const interestingFileNames = [
+      "README.md",
+      "README",
+      "readme.md",
+      "package.json",
+      "tsconfig.json",
+      "pyproject.toml",
+      "requirements.txt",
+      "Cargo.toml",
+    ];
+
+    const interestingFiles = rootEntries
+      .filter((entry) => entry.type === "file" && interestingFileNames.includes(entry.name))
+      .slice(0, 4);
+    const fileSnapshots = await Promise.all(
+      interestingFiles.map(async (entry) => {
+        const content = await this.getFileContent(repository, entry.path, repoDetails.default_branch);
+        if (!content) {
+          return undefined;
+        }
+
+        return `### ${entry.path}\n${this.truncate(content, 1400)}`;
+      }),
+    );
+
+    const rootListing = rootEntries
+      .map((entry) => `- ${entry.type}: ${entry.path}`)
+      .join("\n");
+
+    return [
+      `Repository: ${repository.owner}/${repository.repo}`,
+      `Default branch: ${repoDetails.default_branch}`,
+      repoDetails.description ? `Description: ${repoDetails.description}` : undefined,
+      "",
+      "Root entries:",
+      rootListing || "- (no entries returned)",
+      "",
+      fileSnapshots.filter((entry): entry is string => Boolean(entry)).join("\n\n"),
+    ]
+      .filter((entry): entry is string => Boolean(entry))
+      .join("\n");
   }
 
   async postComment(context: PullRequestContext, body: string): Promise<void> {
@@ -135,19 +286,56 @@ export class GitHubPullRequestClient {
     });
   }
 
-  async applyCodeChanges(context: PullRequestContext, summary: string): Promise<void> {
-    console.info(`[scaffold] Would apply code changes on ${formatPullRequestRef(context)}`);
-    void summary;
-  }
-
   private async getPullRequest(context: PullRequestContext): Promise<PullRequestDetails> {
     return this.request<PullRequestDetails>(
       `/repos/${context.owner}/${context.repo}/pulls/${context.pullNumber}`,
     );
   }
 
+  private async getRepository(repository: RepositoryContext): Promise<RepositoryDetails> {
+    return this.request<RepositoryDetails>(`/repos/${repository.owner}/${repository.repo}`);
+  }
+
+  private async getReference(
+    repository: RepositoryContext,
+    branch: string,
+  ): Promise<GitReferenceResponse> {
+    return this.request<GitReferenceResponse>(
+      `/repos/${repository.owner}/${repository.repo}/git/ref/heads/${encodeURIComponent(branch)}`,
+    );
+  }
+
+  private async findOpenPullRequestForBranch(
+    repository: RepositoryContext,
+    branch: string,
+  ): Promise<PullRequestSummary | undefined> {
+    const query = new URLSearchParams({
+      state: "open",
+      head: `${repository.owner}:${branch}`,
+    });
+
+    const pullRequests = await this.request<PullRequestSummary[]>(
+      `/repos/${repository.owner}/${repository.repo}/pulls?${query.toString()}`,
+    );
+
+    return pullRequests[0];
+  }
+
+  private async listDirectory(
+    repository: RepositoryContext,
+    path: string,
+    ref: string,
+  ): Promise<DirectoryEntryResponse[]> {
+    const pathSegment = path.length > 0 ? `/${encodeURIComponent(path)}` : "";
+    const response = await this.request<DirectoryEntryResponse[]>(
+      `/repos/${repository.owner}/${repository.repo}/contents${pathSegment}?ref=${encodeURIComponent(ref)}`,
+    );
+
+    return Array.isArray(response) ? response : [];
+  }
+
   private async getFileContent(
-    repository: { owner: string; repo: string },
+    repository: RepositoryContext,
     path: string,
     ref: string,
   ): Promise<string | undefined> {
@@ -164,7 +352,7 @@ export class GitHubPullRequestClient {
   }
 
   private async getContentMetadata(
-    repository: { owner: string; repo: string },
+    repository: RepositoryContext,
     path: string,
     ref: string,
   ): Promise<ContentFileResponse | undefined> {
@@ -179,6 +367,10 @@ export class GitHubPullRequestClient {
 
       throw error;
     }
+  }
+
+  private truncate(value: string, maxLength: number): string {
+    return value.length > maxLength ? `${value.slice(0, maxLength)}\n...` : value;
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
