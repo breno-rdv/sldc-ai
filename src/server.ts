@@ -27,6 +27,10 @@ interface GitHubIssueCommentWebhookPayload {
   action: string;
   comment?: {
     body?: string;
+    user?: {
+      login?: string;
+      type?: string;
+    };
   };
   issue?: {
     number?: number;
@@ -39,6 +43,86 @@ interface GitHubIssueCommentWebhookPayload {
     owner?: {
       login?: string;
     };
+  };
+  sender?: {
+    login?: string;
+    type?: string;
+  };
+}
+
+interface GitHubPullRequestReviewCommentWebhookPayload {
+  action: string;
+  comment?: {
+    body?: string;
+    user?: {
+      login?: string;
+      type?: string;
+    };
+  };
+  pull_request?: {
+    number?: number;
+  };
+  repository?: {
+    name?: string;
+    owner?: {
+      login?: string;
+    };
+  };
+  sender?: {
+    login?: string;
+    type?: string;
+  };
+}
+
+interface NormalizedGitHubCommentCommand {
+  commentBody: string;
+  owner?: string;
+  repo?: string;
+  pullNumber?: number;
+}
+
+function isBotActor(actor?: { type?: string }): boolean {
+  return actor?.type === "Bot";
+}
+
+function normalizeGitHubCommentCommand(
+  request: Request,
+  payload: GitHubIssueCommentWebhookPayload | GitHubPullRequestReviewCommentWebhookPayload,
+): NormalizedGitHubCommentCommand | undefined {
+  const eventName = request.header("x-github-event");
+
+  if ("sender" in payload && isBotActor(payload.sender)) {
+    return undefined;
+  }
+
+  if ("comment" in payload && isBotActor(payload.comment?.user)) {
+    return undefined;
+  }
+
+  if (eventName === "pull_request_review_comment") {
+    const reviewPayload = payload as GitHubPullRequestReviewCommentWebhookPayload;
+    if (reviewPayload.action !== "created") {
+      return undefined;
+    }
+
+    return {
+      commentBody: reviewPayload.comment?.body ?? "",
+      owner: reviewPayload.repository?.owner?.login,
+      repo: reviewPayload.repository?.name,
+      pullNumber: reviewPayload.pull_request?.number,
+    };
+  }
+
+  const issueCommentPayload = payload as GitHubIssueCommentWebhookPayload;
+  if (issueCommentPayload.action !== "created" || !issueCommentPayload.issue?.pull_request) {
+    return undefined;
+  }
+
+  return {
+    commentBody: issueCommentPayload.comment?.body ?? "",
+    owner: issueCommentPayload.repository?.owner?.login,
+    repo: issueCommentPayload.repository?.name,
+    pullNumber: issueCommentPayload.issue.number,
   };
 }
 
@@ -194,18 +278,22 @@ app.post("/webhooks/clickup", async (request: Request, response: Response) => {
 });
 
 app.post("/webhooks/github", async (request: Request, response: Response) => {
-  const payload = request.body as GitHubIssueCommentWebhookPayload;
+  const payload = request.body as
+    | GitHubIssueCommentWebhookPayload
+    | GitHubPullRequestReviewCommentWebhookPayload;
   const source: CommandSource = "github";
-  const commentBody = payload.comment?.body ?? "";
-  const command = extractCommand(commentBody);
+  const normalizedCommand = normalizeGitHubCommentCommand(request, payload);
 
-  if (payload.action !== "created" || !payload.issue?.pull_request) {
-    response.status(429).json({ ignored: "Only PR issue_comment created events are handled." });
+  if (!normalizedCommand) {
+    response.status(202).json({ ignored: "Only newly created PR comments are handled." });
     return;
   }
 
+  const commentBody = normalizedCommand.commentBody;
+  const command = extractCommand(commentBody);
+
   if (!command) {
-    response.status(400).json({ ignored: "No supported workflow command detected." });
+    response.status(202).json({ ignored: "No supported workflow command detected." });
     return;
   }
 
@@ -214,9 +302,9 @@ app.post("/webhooks/github", async (request: Request, response: Response) => {
     return;
   }
 
-  const pullNumber = payload.issue.number;
-  const owner = payload.repository?.owner?.login;
-  const repo = payload.repository?.name;
+  const pullNumber = normalizedCommand.pullNumber;
+  const owner = normalizedCommand.owner;
+  const repo = normalizedCommand.repo;
 
   if (!pullNumber || !owner || !repo) {
     response.status(400).json({ error: "Missing repository or pull request context." });
