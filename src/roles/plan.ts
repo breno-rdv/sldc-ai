@@ -5,15 +5,17 @@ export async function runPlan(
   input: RoleContext,
   llmClient: GitHubModelsWorkflowClient,
 ): Promise<RoleResult> {
-  const specSummary = input.artifacts["spec.md"] ?? "spec.md not loaded yet in this scaffold.";
+  const researchSummary =
+    input.artifacts["research.md"] ?? "research.md not loaded yet in this scaffold.";
+  const specSummary = input.artifacts["spec.md"];
 
   const content = await llmClient.renderArtifact({
     title: "Implementation Plan",
-    summary: "Planning artifact generated from the current specification.",
+    summary: "Planning artifact generated from the current research context.",
     sections: [
       {
         heading: "Goal",
-        body: "Turn the approved specification into an implementation sequence with bounded scope.",
+        body: "Turn the approved research findings into an implementation sequence with bounded scope.",
       },
       {
         heading: "Files to Modify",
@@ -28,7 +30,7 @@ export async function runPlan(
       {
         heading: "Steps",
         bullets: [
-          "Confirm spec completeness.",
+          "Confirm the research context is sufficient to plan the work.",
           "Limit edits to planned files.",
           "Generate code changes for the approved scope.",
           "Run validation before handoff.",
@@ -42,14 +44,20 @@ export async function runPlan(
         ],
       },
       {
-        heading: "Spec Input",
-        body: specSummary,
+        heading: "Research Input",
+        body: researchSummary,
       },
+      specSummary
+        ? {
+            heading: "Supporting Spec Input",
+            body: specSummary,
+          }
+        : undefined,
       {
         heading: "Current Trigger",
         body: input.taskBody,
       },
-    ],
+    ].filter((section): section is NonNullable<typeof section> => Boolean(section)),
   });
 
   return {

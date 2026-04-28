@@ -5,12 +5,19 @@ export async function runCode(
   input: RoleContext,
   llmClient: GitHubModelsWorkflowClient,
 ): Promise<RoleResult> {
+  const implementationContext =
+    input.artifacts["plan.md"] ?? "plan.md not loaded yet in this scaffold.";
+  const primaryScopeContext =
+    input.artifacts["spec.md"]
+    ?? input.artifacts["research.md"]
+    ?? "Neither spec.md nor research.md is loaded yet in this scaffold.";
+
   const implementationOutline = await llmClient.renderComment({
     role: "Code Agent",
-    objective: "Prepare code changes that follow the approved specification and plan.",
+    objective: "Prepare code changes that follow the approved scope and implementation plan.",
     inputs: [
-      input.artifacts["spec.md"] ?? "spec.md not loaded yet in this scaffold.",
-      input.artifacts["plan.md"] ?? "plan.md not loaded yet in this scaffold.",
+      primaryScopeContext,
+      implementationContext,
       input.taskBody,
     ],
   });

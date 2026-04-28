@@ -5,11 +5,17 @@ export async function runValidate(
   input: RoleContext,
   llmClient: GitHubModelsWorkflowClient,
 ): Promise<RoleResult> {
+  const validationScope =
+    input.artifacts["spec.md"]
+    ?? input.artifacts["plan.md"]
+    ?? input.artifacts["research.md"]
+    ?? "No workflow artifact is loaded yet in this scaffold.";
+
   const content = await llmClient.renderComment({
     role: "Validate Agent",
     objective: "Check acceptance criteria, surface gaps, and outline follow-up tests.",
     inputs: [
-      input.artifacts["spec.md"] ?? "spec.md not loaded yet in this scaffold.",
+      validationScope,
       input.taskBody,
     ],
   });
