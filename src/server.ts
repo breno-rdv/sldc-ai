@@ -74,6 +74,30 @@ interface GitHubPullRequestReviewCommentWebhookPayload {
   };
 }
 
+interface GitHubPullRequestReviewWebhookPayload {
+  action: string;
+  review?: {
+    body?: string;
+    user?: {
+      login?: string;
+      type?: string;
+    };
+  };
+  pull_request?: {
+    number?: number;
+  };
+  repository?: {
+    name?: string;
+    owner?: {
+      login?: string;
+    };
+  };
+  sender?: {
+    login?: string;
+    type?: string;
+  };
+}
+
 interface NormalizedGitHubCommentCommand {
   commentBody: string;
   owner?: string;
@@ -87,7 +111,10 @@ function isBotActor(actor?: { type?: string }): boolean {
 
 function normalizeGitHubCommentCommand(
   request: Request,
-  payload: GitHubIssueCommentWebhookPayload | GitHubPullRequestReviewCommentWebhookPayload,
+  payload:
+    | GitHubIssueCommentWebhookPayload
+    | GitHubPullRequestReviewCommentWebhookPayload
+    | GitHubPullRequestReviewWebhookPayload,
 ): NormalizedGitHubCommentCommand | undefined {
   const eventName = request.header("x-github-event");
 
@@ -107,6 +134,24 @@ function normalizeGitHubCommentCommand(
 
     return {
       commentBody: reviewPayload.comment?.body ?? "",
+      owner: reviewPayload.repository?.owner?.login,
+      repo: reviewPayload.repository?.name,
+      pullNumber: reviewPayload.pull_request?.number,
+    };
+  }
+
+  if (eventName === "pull_request_review") {
+    const reviewPayload = payload as GitHubPullRequestReviewWebhookPayload;
+    if (reviewPayload.action !== "submitted") {
+      return undefined;
+    }
+
+    if (isBotActor(reviewPayload.review?.user)) {
+      return undefined;
+    }
+
+    return {
+      commentBody: reviewPayload.review?.body ?? "",
       owner: reviewPayload.repository?.owner?.login,
       repo: reviewPayload.repository?.name,
       pullNumber: reviewPayload.pull_request?.number,
@@ -280,12 +325,16 @@ app.post("/webhooks/clickup", async (request: Request, response: Response) => {
 app.post("/webhooks/github", async (request: Request, response: Response) => {
   const payload = request.body as
     | GitHubIssueCommentWebhookPayload
-    | GitHubPullRequestReviewCommentWebhookPayload;
+    | GitHubPullRequestReviewCommentWebhookPayload
+    | GitHubPullRequestReviewWebhookPayload;
   const source: CommandSource = "github";
   const normalizedCommand = normalizeGitHubCommentCommand(request, payload);
 
   if (!normalizedCommand) {
-    response.status(202).json({ ignored: "Only newly created PR comments are handled." });
+    response.status(202).json({
+      ignored: "Only newly created PR comments or submitted PR reviews with workflow commands are handled.",
+      event: request.header("x-github-event") ?? "unknown",
+    });
     return;
   }
 
@@ -293,7 +342,10 @@ app.post("/webhooks/github", async (request: Request, response: Response) => {
   const command = extractCommand(commentBody);
 
   if (!command) {
-    response.status(202).json({ ignored: "No supported workflow command detected." });
+    response.status(202).json({
+      ignored: "No supported workflow command detected.",
+      event: request.header("x-github-event") ?? "unknown",
+    });
     return;
   }
 
