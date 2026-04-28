@@ -78,6 +78,9 @@ export class GitHubModelsWorkflowClient {
       return await this.generateText([
         "You are generating a structured markdown artifact for a spec-driven development pipeline.",
         "Return markdown only.",
+        "Ground every section in the provided inputs.",
+        "Do not invent repository files, modules, or capabilities that are not supported by the inputs.",
+        "When exact file paths are unknown, refer to directories, components, or investigation steps instead.",
         "",
         `Title: ${input.title}`,
         `Summary: ${input.summary}`,
