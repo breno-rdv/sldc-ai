@@ -373,6 +373,7 @@ app.post("/webhooks/github", async (request: Request, response: Response) => {
     "research.md",
     "spec.md",
     "plan.md",
+    "code.md",
   ]);
   const result = await routeCommand(
     command,

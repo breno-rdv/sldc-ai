@@ -12,20 +12,41 @@ export async function runCode(
     ?? input.artifacts["research.md"]
     ?? "Neither spec.md nor research.md is loaded yet in this scaffold.";
 
-  const implementationOutline = await llmClient.renderComment({
-    role: "Code Agent",
-    objective: "Prepare code changes that follow the approved scope and implementation plan.",
-    inputs: [
-      primaryScopeContext,
-      implementationContext,
-      input.taskBody,
+  const implementationOutline = await llmClient.renderArtifact({
+    title: "Code Implementation Draft",
+    summary: "Implementation artifact generated from the approved scope and plan.",
+    sections: [
+      {
+        heading: "Goal",
+        body: "Translate the approved workflow context into concrete repository changes.",
+      },
+      {
+        heading: "Scope Context",
+        body: primaryScopeContext,
+      },
+      {
+        heading: "Implementation Plan Input",
+        body: implementationContext,
+      },
+      {
+        heading: "Requested Command",
+        body: input.taskBody,
+      },
+      {
+        heading: "Expected Deliverables",
+        bullets: [
+          "List the repository files or directories that should be added or updated.",
+          "Describe the concrete code or documentation changes required in each location.",
+          "Call out unknowns that still need manual repository inspection before editing exact files.",
+        ],
+      },
     ],
   });
 
   return {
-    kind: "comment",
-    fileName: "plan.md",
+    kind: "artifact",
+    fileName: "code.md",
     content: implementationOutline,
-    summary: "Code step routed. Real diff application is intentionally left as an MVP placeholder.",
+    summary: "Code implementation artifact generated successfully.",
   };
 }

@@ -12,7 +12,7 @@ export type SupportedCommand =
   | "/code"
   | "/validate";
 
-export type ArtifactFileName = "research.md" | "spec.md" | "plan.md";
+export type ArtifactFileName = "research.md" | "spec.md" | "plan.md" | "code.md";
 
 export type WorkflowArtifacts = Partial<Record<ArtifactFileName, string>>;
 
